@@ -1,17 +1,30 @@
+# -----------------------------------------------------------------------------------------------------------------------
+# IMPORTS
+# -----------------------------------------------------------------------------------------------------------------------
 import math
 import random
 import gymnasium as gym
-import matplotlib.pyplot as plt
 from collections import namedtuple, deque
 from itertools import count
-import matplotlib
 from datetime import datetime
 import numpy as np
+import time, csv, os, glob
+import pandas as pd
+
+import matplotlib
+import matplotlib.pyplot as plt
+plt.ion()
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from moviepy.editor import ImageSequenceClip
+
+
+
+# --------------------------------------------------------------------------------------------------------------------------
+# DATA FROM MEASUREMENTS and its utility functions
+# --------------------------------------------------------------------------------------------------------------------------
 
 # Actual hardware metrics extracted from measurements
 ON_OFF_RATIO = 1.57
@@ -59,6 +72,18 @@ results = {'10.9': [np.float64(0.00011886583678895393), np.array([ 2.65028370e+0
 OPERATING_VOLTAGE = 0.9
 PULSE = 1
 
+# configs =   = [('1', +0.9), ('1', +0.45), .... ('0', -0.3)]
+def hw_configs(results_dict):
+    configs = []
+    for k in results_dict.keys():
+        pulse_flag = int(k[0])       
+        v_amp      = float(k[1:])      
+        configs.append((pulse_flag, v_amp))
+    
+    configs.sort(key=lambda x: (-abs(x[1]), -x[1]))  # sorting just for neatness
+    return configs
+
+
 minimum, popt, pcov = results[str(PULSE)+str(OPERATING_VOLTAGE)]
 maximum, popt, pcov = results[str(PULSE)+str(-1*OPERATING_VOLTAGE)]
 width = (maximum - minimum) / 2
@@ -69,7 +94,14 @@ def rand_conversion(x, popt, std):
     return np.random.normal(loc=slope, scale=std)
    
 
-# Adam with fitted-polynomial hardware conversion.
+
+
+
+# ----------------------------------------------------------------------------------------------------------------------------
+# CLASS DEFENITIONS
+# ----------------------------------------------------------------------------------------------------------------------------
+
+# 1. Adam with fitted-polynomial hardware conversion.
 class HardwareAdam(torch.optim.Optimizer):
     def __init__(self, params, lr=1e-4, betas=(0.9, 0.999), eps=1e-8, 
                  pulse=PULSE, v_amp=OPERATING_VOLTAGE, max_gain=1.0, noise_clip=1e6):
@@ -175,7 +207,7 @@ class HardwareAdam(torch.optim.Optimizer):
         return loss
 
 
-
+# 2. Linear layers of the neural network
 class LinearLayer(nn.Linear):
     def __init__(self, in_features, out_features, on_off_ratio, write_noise_std, read_noise_std, linearity, symmetry):
         super().__init__(in_features, out_features)
@@ -236,7 +268,7 @@ class LinearLayer(nn.Linear):
 
 
 
-# DQN with hardware-aware synapses
+# 3. DQN with hardware-aware synapses
 class HardwareDQN(nn.Module):
     def __init__(self, n_obs, n_act):
         super().__init__()
@@ -255,18 +287,46 @@ class HardwareDQN(nn.Module):
         self.fc3.apply_write_noise()
 
 
-# Training setup
+# 4. Logging for further analysis
+class Logger:
+    def __init__(self, tag):
+        self.tag          = tag
+        self.t0           = time.perf_counter()
+        self.episode_log  = []   # (episode_idx, steps, elapsed_s)
+
+    def record(self, idx, steps):
+        elapsed = time.perf_counter() - self.t0
+        self.episode_log.append((idx, steps, elapsed))
+
+    def save(self, folder="logs"):
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, f"{self.tag}.csv")
+        with open(path, 'w', newline='') as f:
+            w = csv.writer(f)
+            w.writerow(["episode", "steps", "elapsed_s"])
+            w.writerows(self.episode_log)
+        print(f"Log saved ➜ {path}")
+
+
+
+
+# ----------------------------------------------------------------------------------------------------------------------------
+# GENERAL SETUP AND CONSTANTS
+# ----------------------------------------------------------------------------------------------------------------------------
+
 is_ipython = 'inline' in matplotlib.get_backend()    # set up matplotlib
 if is_ipython:
     from IPython import display
-
-plt.ion()
 
 device = torch.device(                              # if GPU is to be used
     "cuda" if torch.cuda.is_available() else
     "mps" if torch.backends.mps.is_available() else
     "cpu"
 )
+print("Device selected: ", device)
+if device.type == "cuda":
+    print("CUDA device: ", torch.cuda.get_device_name(device))
+
 env = gym.make("CartPole-v1", render_mode="rgb_array")
 
 
@@ -293,25 +353,16 @@ EPS_DECAY = 1000
 TAU = 0.005      # Stability in Q-value targets (smaller, the better)
 LR = 0.00025
 
-
-best_score = -float('inf')  # for tracking best 100-episode average
-
 n_actions = env.action_space.n
 state, _ = env.reset()
 n_observations = len(state)
 
-policy_net = HardwareDQN(n_observations, n_actions).to(device)
-target_net = HardwareDQN(n_observations, n_actions).to(device)
-target_net.load_state_dict(policy_net.state_dict())
-target_net.eval()
 
-# optimizer = optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)  -  SOFTWARE
-optimizer = HardwareAdam(policy_net.parameters(), lr=2.5e-4, pulse=PULSE, v_amp=OPERATING_VOLTAGE, max_gain=5.0)
+# ---------------------------------------------------------------------------------------------------------------------------------
+# FUNCTION DEFENITIONS
+# --------------------------------------------------------------------------------------------------------------------------------
 
-memory = ReplayMemory(10000)
-steps_done = 0
-episode_durations = []
-
+# 1. ε-greedy policy: choose a random action or the network’s arg-max Q
 def select_action(state):
     global steps_done
     eps_threshold = EPS_END + (EPS_START - EPS_END) * math.exp(-1. * steps_done / EPS_DECAY)  # ε-greedy strategy
@@ -325,10 +376,14 @@ def select_action(state):
     else:
         return torch.tensor([[env.action_space.sample()]], device=device, dtype=torch.long)
 
+
+# 2. Greedy policy used for evaluation (no exploration)
 def select_action_learned(state):
     with torch.no_grad():
         return policy_net(state).max(1).indices.view(1, 1)
 
+
+# 3. Sample a batch, compute DQN loss, run HardwareAdam step, add write-noise {Learning}
 def optimize_model():
     if len(memory) < BATCH_SIZE:
         return
@@ -370,6 +425,7 @@ def optimize_model():
         policy_net.apply_noise_and_clip()
 
 
+# 4. Live plot of episode lengths and 100-episode rolling average
 def plot_durations():
     plt.figure(1)
     plt.clf()
@@ -388,6 +444,7 @@ def plot_durations():
         display.clear_output(wait=True)
 
 
+# 5. Play one episode with the learned policy and save it as an MP4
 def record_video(env, filename, fps=15):
     frames = []
     done = False
@@ -410,46 +467,88 @@ def record_video(env, filename, fps=15):
     clip.write_videofile(filename, fps=fps)
     
 
-# Training loop
+
+# --------------------------------------------------------------------------------------------------------------------------
+# MAIN CODE
+# ---------------------------------------------------------------------------------------------------------------------------
+
 num_episodes = 300
-for i_episode in range(num_episodes):
-    state, _ = env.reset()
-    state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-    for t in count():
-        action = select_action(state)
-        observation, reward, terminated, truncated, _ = env.step(action.item())
-        done = terminated or truncated
-        reward = torch.tensor([reward], device=device)
-        next_state = None if done else torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
-        memory.push(state, action, next_state, reward)
-        state = next_state
-        optimize_model()
-        for target_param, policy_param in zip(target_net.parameters(), policy_net.parameters()):
-            target_param.data.copy_(TAU * policy_param.data + (1.0 - TAU) * target_param.data)
 
-        if done:
-            episode_durations.append(t + 1)
-            plot_durations()
+for PULSE, OPERATING_VOLTAGE in hw_configs(results):
+    tag = f"pulse {PULSE} - {OPERATING_VOLTAGE:+.2f}V"
+    print(f"\n=================  Training {tag}  =================")
 
-            # Save model if current 100-episode average is the best so far
-            if len(episode_durations) >= 100:
-                rolling_avg = sum(episode_durations[-100:]) / 100
-                if rolling_avg > best_score:
-                    best_score = rolling_avg
-                    torch.save(policy_net.state_dict(), "best_model.pt")
-                    print(f"New best model saved with 100-ep avg: {rolling_avg:.2f}")
+    # Hardware configuration
+    globals()["PULSE"]             = PULSE
+    globals()["OPERATING_VOLTAGE"] = OPERATING_VOLTAGE
 
-            break
+    # Build the networks
+    policy_net  = HardwareDQN(n_observations, n_actions).to(device)
+    target_net  = HardwareDQN(n_observations, n_actions).to(device)
+    target_net.load_state_dict(policy_net.state_dict())
+    target_net.eval()
 
+    # optimizer = optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)  -  SOFTWARE
+    optimizer   = HardwareAdam(policy_net.parameters(), lr=2.5e-4, pulse=PULSE, v_amp=OPERATING_VOLTAGE, max_gain=5.0)
 
-print("Training Complete")
-policy_net.load_state_dict(torch.load("best_model.pt"))
-print("Loaded best model for evaluation.")
+    # Fresh replay buffer & counters
+    memory = ReplayMemory(10000)
+    steps_done = 0
+    episode_durations = []
+    best_score = -float('inf')  # for tracking best 100-episode average
 
-plot_durations()
+    logger = Logger(tag)
 
-video_filename = f"Code/Videos/CartPole-v1_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-record_video(env, video_filename)
+    # Training Loop
+    for i_episode in range(num_episodes):
+        state, _ = env.reset()
+        state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+
+        for t in count():
+            action = select_action(state)
+            observation, reward, terminated, truncated, _ = env.step(action.item())
+            done = terminated or truncated
+            reward = torch.tensor([reward], device=device)
+            next_state = None if done else torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
+            memory.push(state, action, next_state, reward)
+            state = next_state
+
+            optimize_model()                   
+
+            for tgt, pol in zip(target_net.parameters(), policy_net.parameters()):
+                tgt.data.copy_(TAU * pol.data + (1.0 - TAU) * tgt.data)
+
+            if done:
+                episode_durations.append(t+1)
+                logger.record(i_episode, t+1)  
+
+                plot_durations() 
+
+                # Save best model parameters
+                if len(episode_durations) >= 100:
+                    avg100 = sum(episode_durations[-100:]) / 100
+                    if avg100 > best_score:
+                        best_score = avg100
+                        torch.save(policy_net.state_dict(), f"best_{tag}.pt")
+                break
+
+    logger.save()
+
+    print("Training Complete")
+    policy_net.load_state_dict(torch.load("best_model.pt"))
+    print("Loaded best model for evaluation.")
+
+    video_filename = f"Code/Videos/CartPole-v1_{PULSE}_{OPERATING_VOLTAGE:+.2f}V.mp4"
+    record_video(env, video_filename)
 
 plt.ioff()
+plt.show()
+
+# Aggregate csv across all runs
+for csv_path in glob.glob("logs/*.csv"):
+    df = pd.read_csv(csv_path)
+    plt.plot(df["episode"], df["steps"], label=os.path.basename(csv_path))
+plt.xlabel("Episode")
+plt.ylabel("CartPole steps (score)")
+plt.legend()
 plt.show()
