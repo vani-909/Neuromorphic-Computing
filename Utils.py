@@ -68,7 +68,7 @@ for file in csv_files:
 
     # 3. Print runtime for every training 
     time_df = pd.DataFrame.from_dict(total_times, orient='index', columns=["Total Time (s)"])
-    time_df = time_df.sort_values(by="Total Time (s)", ascending=False)
+    time_df = time_df.sort_values(by="Total Time (min)", ascending=False)
 
 print(time_df)
 plot_duration_histogram(pulse=1, voltage=0.9)
