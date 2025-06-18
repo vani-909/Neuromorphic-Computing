@@ -2,36 +2,51 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import glob
+import numpy as np
 
 # 1. Plot histogram
-def plot_duration_histogram(pulse, voltage, bins=20):
-    filename = f"pulse {pulse} - {voltage:+.2f}V.csv"
-    filepath = os.path.join("logs", filename)
+def plot_duration_histogram(voltage, bins=20):
+    LOG_DIR = "logs"
+    patterns = [
+        f"pulse 1 - {voltage:+.2f}V.csv",
+        f"pulse 1 - {-voltage:+.2f}V.csv",
+        f"pulse 0 - {voltage:+.2f}V.csv",
+        f"pulse 0 - {-voltage:+.2f}V.csv",
+    ]
 
-    if not os.path.exists(filepath):
-        print(f"[ERROR] File not found: {filepath}")
+    all_data = []
+    for fname in patterns:
+        path = os.path.join(LOG_DIR, fname)
+        df = pd.read_csv(path)
+        last100 = df.iloc[-100:, 1].values
+        all_data.append(last100)
+
+    if not all_data:
+        print(f"No data found for voltage {voltage:+.2f}V")
         return
 
-    df = pd.read_csv(filepath)
-    durations = df.iloc[:, 1] 
-
-    last100 = durations[-100:] 
+    data = np.concatenate(all_data)
+    counts, edges = np.histogram(data, bins=bins)
 
     plt.figure(figsize=(8, 5))
-    plt.hist(last100, bins=bins, color='skyblue', edgecolor='black', density=True)
-    plt.title(f"Histogram of Episode Durations\n(pulse={pulse}, V={voltage:+.2f}V)")
-    plt.xlabel("Episode Duration (Reward)")
-    plt.ylabel("Probability Density")
+    plt.bar(edges[:-1], counts, width=np.diff(edges), edgecolor='black', align='edge')
+    plt.title(f"Last-100 Durations @ {voltage:+.2f} V")
+    plt.xlabel("Duration (steps)")
+    plt.ylabel("Total Count")
     plt.grid(True)
     plt.tight_layout()
     plt.show()
 
-    print("Mean:", last100.mean())
-    print("Std Dev:", last100.std())
-    print("Max:", last100.max())
-    print("Last 100 Episodes > 300 steps:", (last100 > 300).sum())
+    mean   = data.mean()
+    std    = data.std()
+    mx     = data.max()
+    c = (data > 300).sum()
+    total = data.size
+    per = c/total * 100
 
+    print(f"Voltage {voltage:+.2f}V → Mean: {mean:.2f}, Std: {std:.2f}, Max: {mx:.0f}, episodes > 300 steps: {per}%")
 
+    
 # 2. Export all csv files to png images
 csv_files = glob.glob("logs/*.csv")
 
@@ -53,7 +68,7 @@ for file in csv_files:
     rolling_avg = durations.rolling(window=100).mean()
     rolling_avg[:99] = 0
     
-    plt.figure(figsize=(8, 5))
+    plt.figure(figsize=(10, 7))
     plt.plot(episodes, durations, label='Episode Duration')
     plt.plot(episodes, rolling_avg, color='orange', linewidth=2, label='100-Episode Average')
     plt.xlabel("Episode")
@@ -71,4 +86,7 @@ for file in csv_files:
     time_df = time_df.sort_values(by="Total Time (min)", ascending=False)
 
 print(time_df)
-plot_duration_histogram(pulse=1, voltage=0.9)
+
+voltages = [0.90, 0.45, 0.30]
+for v in voltages:
+    plot_duration_histogram(v)
