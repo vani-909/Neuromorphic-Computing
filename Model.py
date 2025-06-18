@@ -527,7 +527,8 @@ for PULSE, OPERATING_VOLTAGE in hw_configs(results):
                     avg100 = sum(episode_durations[-100:]) / 100
                     if avg100 > best_score:
                         best_score = avg100
-                        torch.save(policy_net.state_dict(), f"best_{tag}.pt")
+                        os.makedirs("Best Models", exist_ok=True)
+                        torch.save(policy_net.state_dict(), f"Best Models/best_{tag}.pt")
                 break
 
     logger.save()
