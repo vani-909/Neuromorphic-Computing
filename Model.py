@@ -69,7 +69,7 @@ results = {'10.9': [np.float64(0.00011886583678895393), np.array([ 2.65028370e+0
 
 
 # Play around with these 2 values obtained during measurement 
-OPERATING_VOLTAGE = 0.9
+OPERATING_VOLTAGE = 0.45
 PULSE = 1
 
 # configs =   = [('1', +0.9), ('1', +0.45), .... ('0', -0.3)]
@@ -79,8 +79,6 @@ def hw_configs(results_dict):
         pulse_flag = int(k[0])       
         v_amp      = float(k[1:])      
         configs.append((pulse_flag, v_amp))
-    
-    configs.sort(key=lambda x: (-abs(x[1]), -x[1]))  # sorting just for neatness
     return configs
 
 
@@ -535,11 +533,14 @@ for PULSE, OPERATING_VOLTAGE in hw_configs(results):
     logger.save()
 
     print("Training Complete")
-    policy_net.load_state_dict(torch.load("best_model.pt"))
+    policy_net.load_state_dict(torch.load(f"best_pulse {PULSE} - {OPERATING_VOLTAGE:+.2f}V.pt"))
     print("Loaded best model for evaluation.")
 
-    video_filename = f"Code/Videos/CartPole-v1_{PULSE}_{OPERATING_VOLTAGE:+.2f}V.mp4"
-    record_video(env, video_filename)
+    video_filename = f"CartPole-v1_{PULSE}_{OPERATING_VOLTAGE:+.2f}V.mp4"
+    video_dir = "Videos"
+    os.makedirs(video_dir, exist_ok=True) 
+    full_video_path = os.path.join(video_dir, video_filenam)
+    record_video(env, full_video_path)
 
 plt.ioff()
 plt.show()
