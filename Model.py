@@ -470,87 +470,92 @@ def record_video(env, filename, fps=15):
 # MAIN CODE
 # ---------------------------------------------------------------------------------------------------------------------------
 
-num_episodes = 300
+def train_all():
+       num_episodes = 300
+       
+       for PULSE, OPERATING_VOLTAGE in hw_configs(results):
+           tag = f"pulse {PULSE} - {OPERATING_VOLTAGE:+.2f}V"
+           print(f"\n=================  Training {tag}  =================")
+       
+           # Hardware configuration
+           globals()["PULSE"]             = PULSE
+           globals()["OPERATING_VOLTAGE"] = OPERATING_VOLTAGE
+       
+           # Build the networks
+           policy_net  = HardwareDQN(n_observations, n_actions).to(device)
+           target_net  = HardwareDQN(n_observations, n_actions).to(device)
+           target_net.load_state_dict(policy_net.state_dict())
+           target_net.eval()
+       
+           # optimizer = optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)  -  SOFTWARE
+           optimizer   = HardwareAdam(policy_net.parameters(), lr=2.5e-4, pulse=PULSE, v_amp=OPERATING_VOLTAGE, max_gain=5.0)
+       
+           # Fresh replay buffer & counters
+           memory = ReplayMemory(10000)
+           steps_done = 0
+           episode_durations = []
+           best_score = -float('inf')  # for tracking best 100-episode average
+       
+           logger = Logger(tag)
+       
+           # Training Loop
+           for i_episode in range(num_episodes):
+               state, _ = env.reset()
+               state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+       
+               for t in count():
+                   action = select_action(state)
+                   observation, reward, terminated, truncated, _ = env.step(action.item())
+                   done = terminated or truncated
+                   reward = torch.tensor([reward], device=device)
+                   next_state = None if done else torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
+                   memory.push(state, action, next_state, reward)
+                   state = next_state
+       
+                   optimize_model()                   
+       
+                   for tgt, pol in zip(target_net.parameters(), policy_net.parameters()):
+                       tgt.data.copy_(TAU * pol.data + (1.0 - TAU) * tgt.data)
+       
+                   if done:
+                       episode_durations.append(t+1)
+                       logger.record(i_episode, t+1)  
+       
+                       plot_durations() 
+       
+                       # Save best model parameters
+                       if len(episode_durations) >= 100:
+                           avg100 = sum(episode_durations[-100:]) / 100
+                           if avg100 > best_score:
+                               best_score = avg100
+                               os.makedirs("Best Models", exist_ok=True)
+                               torch.save(policy_net.state_dict(), f"Best Models/best_{tag}.pt")
+                       break
+       
+           logger.save()
+       
+           print("Training Complete")
+           policy_net.load_state_dict(torch.load(f"best_pulse {PULSE} - {OPERATING_VOLTAGE:+.2f}V.pt"))
+           print("Loaded best model for evaluation.")
+       
+           video_filename = f"CartPole-v1_{PULSE}_{OPERATING_VOLTAGE:+.2f}V.mp4"
+           video_dir = "Videos"
+           os.makedirs(video_dir, exist_ok=True) 
+           full_video_path = os.path.join(video_dir, video_filenam)
+           record_video(env, full_video_path)
+       
+       plt.ioff()
+       plt.show()
+       
+       # Aggregate csv across all runs
+       for csv_path in glob.glob("logs/*.csv"):
+           df = pd.read_csv(csv_path)
+           plt.plot(df["episode"], df["steps"], label=os.path.basename(csv_path))
+       plt.xlabel("Episode")
+       plt.ylabel("CartPole steps (score)")
+       plt.legend()
+       plt.show()
 
-for PULSE, OPERATING_VOLTAGE in hw_configs(results):
-    tag = f"pulse {PULSE} - {OPERATING_VOLTAGE:+.2f}V"
-    print(f"\n=================  Training {tag}  =================")
 
-    # Hardware configuration
-    globals()["PULSE"]             = PULSE
-    globals()["OPERATING_VOLTAGE"] = OPERATING_VOLTAGE
-
-    # Build the networks
-    policy_net  = HardwareDQN(n_observations, n_actions).to(device)
-    target_net  = HardwareDQN(n_observations, n_actions).to(device)
-    target_net.load_state_dict(policy_net.state_dict())
-    target_net.eval()
-
-    # optimizer = optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)  -  SOFTWARE
-    optimizer   = HardwareAdam(policy_net.parameters(), lr=2.5e-4, pulse=PULSE, v_amp=OPERATING_VOLTAGE, max_gain=5.0)
-
-    # Fresh replay buffer & counters
-    memory = ReplayMemory(10000)
-    steps_done = 0
-    episode_durations = []
-    best_score = -float('inf')  # for tracking best 100-episode average
-
-    logger = Logger(tag)
-
-    # Training Loop
-    for i_episode in range(num_episodes):
-        state, _ = env.reset()
-        state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-
-        for t in count():
-            action = select_action(state)
-            observation, reward, terminated, truncated, _ = env.step(action.item())
-            done = terminated or truncated
-            reward = torch.tensor([reward], device=device)
-            next_state = None if done else torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
-            memory.push(state, action, next_state, reward)
-            state = next_state
-
-            optimize_model()                   
-
-            for tgt, pol in zip(target_net.parameters(), policy_net.parameters()):
-                tgt.data.copy_(TAU * pol.data + (1.0 - TAU) * tgt.data)
-
-            if done:
-                episode_durations.append(t+1)
-                logger.record(i_episode, t+1)  
-
-                plot_durations() 
-
-                # Save best model parameters
-                if len(episode_durations) >= 100:
-                    avg100 = sum(episode_durations[-100:]) / 100
-                    if avg100 > best_score:
-                        best_score = avg100
-                        os.makedirs("Best Models", exist_ok=True)
-                        torch.save(policy_net.state_dict(), f"Best Models/best_{tag}.pt")
-                break
-
-    logger.save()
-
-    print("Training Complete")
-    policy_net.load_state_dict(torch.load(f"best_pulse {PULSE} - {OPERATING_VOLTAGE:+.2f}V.pt"))
-    print("Loaded best model for evaluation.")
-
-    video_filename = f"CartPole-v1_{PULSE}_{OPERATING_VOLTAGE:+.2f}V.mp4"
-    video_dir = "Videos"
-    os.makedirs(video_dir, exist_ok=True) 
-    full_video_path = os.path.join(video_dir, video_filenam)
-    record_video(env, full_video_path)
-
-plt.ioff()
-plt.show()
-
-# Aggregate csv across all runs
-for csv_path in glob.glob("logs/*.csv"):
-    df = pd.read_csv(csv_path)
-    plt.plot(df["episode"], df["steps"], label=os.path.basename(csv_path))
-plt.xlabel("Episode")
-plt.ylabel("CartPole steps (score)")
-plt.legend()
-plt.show()
+if __name__ == "__main__":
+    train_all()
