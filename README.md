@@ -24,6 +24,7 @@ After running the scipts, the following folders will be created in the working d
 
 
 Experimental files:
+ - train.py: Attempt to consider drift
  - Data_Analysis.ipynb: For analysis of measurement data
  - Test.zip: Initial measurement data
 
@@ -38,9 +39,11 @@ Experimental files:
 2. Run training:
 <pre>
   python Model.py
-  python Utils.py
 </pre>
 
-3. Analyze results:
-- ??
+3. Evaluation
+<pre>
+  python Utils.py
+  python evaluate.py
+</pre>
 
